@@ -1,0 +1,43 @@
+{
+  "node_id": "node_1",
+  "composite_bias_score": 0.3595,
+  "content_retention_score": 0.3451,
+  "bias_breakdown": {
+    "toxicity": 0.0241,
+    "sentiment_polarization": 1.0,
+    "stereotypes": 0.0,
+    "imbalance": 1.0,
+    "context_shift": 0.3569
+  },
+  "transformations": [
+    "stereotypes"
+  ],
+  "masked_manifest_len": 11,
+  "masked_manifest_preview": [
+    {
+      "type": "stereotype",
+      "text": "Women are naturally inferior"
+    },
+    {
+      "type": "stereotype",
+      "text": "Men are obviously superior"
+    },
+    {
+      "type": "stereotype",
+      "text": "Black people are lazy"
+    },
+    {
+      "type": "stereotype",
+      "text": "white people"
+    },
+    {
+      "type": "stereotype",
+      "text": "Asian people are nothing but\n        soulless robots"
+    }
+  ],
+  "text_preview": "\n    This disgusting article was written by complete idiots and morons who don't understand anything.\n        [MASK:STEREOTYPE] at mathematics, science, and logical reasoning because their brains\n    ...",
+  "graph_stats": {
+    "total_nodes": 2,
+    "total_edges": 1
+  }
+}

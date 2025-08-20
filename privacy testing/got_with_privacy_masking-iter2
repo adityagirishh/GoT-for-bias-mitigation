@@ -1,0 +1,923 @@
+#!/usr/bin/env python3
+"""
+Graph-of-Thought Bias Mitigation (Robust Fixed Version)
+
+Key improvements:
+- Case-insensitive and reliable masking for toxicity & stereotypes
+- Duplicate detection tightened: only drop near-exact duplicates (>=0.995) and require explicit is_dup
+- CRS computed with canonicalized masking placeholders so masking length doesn't artificially reduce CRS
+- _is_duplicate returns (is_dup, similarity_score)
+- Added debug logs for acceptance/rejection reasons
+- Configurable min_crs and relax_crs_factor
+"""
+
+import os
+import re
+import json
+import math
+import heapq
+import random
+import logging
+import datetime
+import uuid
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional, Any
+from collections import Counter
+from difflib import SequenceMatcher
+
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
+
+# Try to load sentence-transformers (offline safe fallback)
+try:
+    from sentence_transformers import SentenceTransformer
+    _ST_AVAILABLE = True
+except Exception:
+    SentenceTransformer = None
+    _ST_AVAILABLE = False
+
+# -------------------------
+# Config & Reproducibility
+# -------------------------
+SEED = int(os.getenv("SEED", "42"))
+np.random.seed(SEED)
+random.seed(SEED)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("GoT-Bias-Robust")
+
+MASK_TOKEN_CANON = "[MASKED]"
+def MASK_TYPED(t: str) -> str:
+    return f"[MASK:{t.upper()}]"
+
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
+DEFAULT_EMBED_SIM_THRESHOLD = float(os.getenv("EMBED_SIM_THRESHOLD", "0.85"))
+REWARD_EPS = 0.02
+
+# -------------------------
+# Utilities
+# -------------------------
+_WORD_RE = re.compile(r"\b[\w']+\b", flags=re.UNICODE)
+
+def tokenize_words(text: str) -> List[str]:
+    return _WORD_RE.findall(text.lower()) if text else []
+
+def whole_word_count(text: str, word: str) -> int:
+    if not text or not word:
+        return 0
+    return len(re.findall(rf"\b{re.escape(word)}\b", text.lower()))
+
+def clamp01(x: float) -> float:
+    return 0.0 if x < 0.0 else (1.0 if x > 1.0 else x)
+
+def canonicalize_masks_for_crs(text: str) -> str:
+    """
+    Replace mask tokens like [MASK:TOXICITY] and generated privacy tokens <MASK...>
+    with a canonical placeholder to avoid unfair CRS penalization due to token length differences.
+    """
+    # Replace square-bracket typed masks
+    text = re.sub(r"\[MASK:[A-Z0-9_:+]+\]", MASK_TOKEN_CANON, text)
+    # Replace angle-bracket privacy tokens like <MASKabcd1234>
+    text = re.sub(r"<MASK[0-9a-fA-F]+>", MASK_TOKEN_CANON, text)
+    return text
+
+# -------------------------
+# Privacy masking (mandatory)
+# -------------------------
+def apply_privacy_mask_enhanced(text: str, additional_spans: Optional[List[Dict[str, Any]]] = None
+                               ) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    MANDATORY privacy masking with comprehensive patterns + additional spans.
+    Returns masked_text and a manifest list (each item: token, span, original, type).
+    """
+    PRIVACY_PATTERNS_ENHANCED = [
+        (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "SSN"),
+        (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", re.IGNORECASE), "EMAIL"),
+        (re.compile(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b"), "PHONE"),
+        (re.compile(r"\b\d{1,5}\s+[A-Za-z\s]+(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|blvd|boulevard)\b", re.IGNORECASE), "ADDRESS"),
+        (re.compile(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b"), "FULL_NAME"),
+        (re.compile(r"\b\d{5}(?:-\d{4})?\b"), "ZIP_CODE"),
+    ]
+
+    spans: List[Tuple[int,int]] = []
+    labels: List[str] = []
+
+    for rx, label in PRIVACY_PATTERNS_ENHANCED:
+        for m in rx.finditer(text):
+            spans.append(m.span())
+            labels.append(label)
+
+    if additional_spans:
+        for s_info in additional_spans:
+            start = int(s_info.get("start", 0))
+            end = int(s_info.get("end", 0))
+            if 0 <= start < end <= len(text):
+                spans.append((start, end))
+                labels.append(s_info.get("type", "PRIVACY"))
+
+    if not spans:
+        logger.debug("  [PRIVACY] No privacy spans found to mask")
+        return text, []
+
+    # sort spans and merge overlapping
+    merged = []
+    for (s, e), label in sorted(zip(spans, labels), key=lambda x: x[0][0]):
+        s0,e0 = s
+        if not merged or s0 > merged[-1][1]:
+            merged.append([s0, e0, [label]])
+        else:
+            merged[-1][1] = max(merged[-1][1], e0)
+            merged[-1][2].append(label)
+
+    masked_text = text
+    manifest = []
+    # Replace from back to front
+    for s,e,labels_list in sorted(merged, key=lambda x: x[0], reverse=True):
+        token = f"<MASK{uuid.uuid4().hex[:8]}>"
+        original = masked_text[s:e]
+        masked_text = masked_text[:s] + token + masked_text[e:]
+        manifest.append({
+            "token": token,
+            "span": (s, e),
+            "original": original,
+            "type": ",".join(sorted(set(labels_list)))
+        })
+    manifest.reverse()
+    logger.info(f"  [PRIVACY] Masked {len(manifest)} privacy spans: {sorted({m['type'] for m in manifest})}")
+    return masked_text, manifest
+
+# -------------------------
+# Bias scores dataclass
+# -------------------------
+@dataclass
+class BiasScores:
+    toxicity: float
+    sentiment_polarization: float
+    stereotypes: float
+    imbalance: float
+    context_shift: float
+
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            "toxicity": self.toxicity,
+            "sentiment_polarization": self.sentiment_polarization,
+            "stereotypes": self.stereotypes,
+            "imbalance": self.imbalance,
+            "context_shift": self.context_shift,
+        }
+
+# -------------------------
+# Graph node dataclass
+# -------------------------
+@dataclass
+class GraphNode:
+    node_id: str
+    text_content: str
+    bias_scores: BiasScores
+    cbs: float
+    crs: float
+    transformation_history: List[str]
+    masked_manifest: List[Dict[str, str]]
+    privacy_manifest: List[Dict[str, str]]
+
+    def __hash__(self):
+        return hash(self.node_id)
+
+# -------------------------
+# Bias detector (expanded)
+# -------------------------
+class BiasDetectorEnhanced:
+    def __init__(self):
+        self.toxic_words = {
+            "hate", "stupid", "idiot", "terrible", "awful", "disgusting",
+            "loser", "pathetic", "worthless", "trash", "garbage", "moron", "morons",
+            "dumb", "useless", "incompetent", "failure", "evil", "sick",
+            "vile", "nasty", "foul", "repulsive", "horrible", "malignant",
+            "ignorant", "brainless", "unintelligent", "backward", "primitive",
+            "idiots", "lazy", "parasites", "psychopaths", "greedy", "hypocritical",
+            "fanatics", "terrorists", "inferior", "superior", "drains", "burden", "burdens"
+        }
+
+        self.sentiment_words = {
+            "positive": {"good", "great", "excellent", "amazing", "wonderful", "fantastic", "outstanding",
+                         "brilliant", "superb", "positive", "favorable", "optimistic", "joyful", "happy"},
+            "negative": {"bad", "terrible", "awful", "horrible", "disgusting", "pathetic", "useless",
+                         "inferior", "worse", "negative", "unfavorable", "pessimistic", "sad", "angry",
+                         "idiotic", "morons", "lazy", "evil", "greedy"},
+        }
+
+        self.stereotype_patterns = {
+            "gender": [
+                r"\bwomen\s+are\s+(?:naturally\s+)?inferior\b",
+                r"\bmen\s+are\s+(?:obviously\s+)?superior\b",
+                r"\bwomen\s+are\b.*?\b(?:inferior|worse|bad|terrible)\b",
+                r"\bmen\s+are\b.*?\b(?:superior|better|logical)\b",
+                r"\b(?:women|girls|females)\s+(?:should\s+)?stick\s+to\s+(?:cooking|cleaning|children)\b",
+                r"\b(?:women|girls|females)\s+(?:are\s+)?(?:naturally\s+)?(?:bad|worse|terrible)\s+at\s+(?:math|science|logic)\b",
+                r"\bshe\s+is\s+just\s+a\s+housewife\b",
+            ],
+            "race": [
+                r"\b(?:black|african)\s+people\s+are\s+(?:lazy|violent|inferior|criminals?)\b",
+                r"\b(?:asian)\s+people\s+are\s+(?:robots?|soulless|terrible)\b",
+                r"\b(?:white)\s+people\s+are\s+(?:superior|better)\b",
+                r"\bblack\s+people\b",
+                r"\basian\s+people\b",
+                r"\bwhite\s+people\b",
+                r"\bgenetically\s+predisposed\s+to\s+criminal\b",
+            ],
+            "age": [
+                r"\b(?:old|elderly)\s+people\s+are\s+(?:useless|drains?|burdens?)\b",
+                r"\b(?:young)\s+people\s+are\s+(?:irresponsible|stupid)\b",
+                r"\bold\s+people\b.*?\b(?:useless|drains?|die)\b",
+                r"\byoung\s+people\b.*?\b(?:irresponsible|stupid|don't\s+deserve)\b",
+            ],
+            "religion": [
+                r"\b(?:muslims?)\s+are\s+(?:all\s+)?terrorists?\b",
+                r"\b(?:christians?)\s+are\s+(?:hypocritical\s+)?fanatics?\b",
+                r"\bjews?\s+control\s+(?:all\s+the\s+)?(?:banks?|media)\b",
+                r"\bmuslims\s+are\b",
+                r"\bchristians\s+are\b",
+                r"\bjews\s+(?:are|control)\b",
+            ],
+            "socioeconomic": [
+                r"\bpoor\s+people\s+are\s+(?:lazy\s+)?parasites?\b",
+                r"\brich\s+people\s+are\s+(?:evil|greedy)\s+psychopaths?\b",
+            ],
+            "disability": [
+                r"\bdisabled\s+people\s+are\s+burdens?\b",
+                r"\bdisabled.*?contribute\s+nothing\b",
+            ]
+        }
+
+        self.gender_pronouns = {"he", "she", "him", "her", "male", "female", "man", "woman", "boy", "girl"}
+        self.race_terms = {"black", "white", "asian", "hispanic", "african", "caucasian", "oriental"}
+        self.age_terms = {"young", "old", "elderly", "senior", "teenager", "kid", "child"}
+        self.religion_terms = {"muslim", "christian", "jew", "hindu", "buddhist", "atheist"}
+
+    def compute_toxicity(self, text: str) -> float:
+        toks = tokenize_words(text)
+        toxic_count = sum(1 for t in toks if t in self.toxic_words)
+        score = clamp01(toxic_count / len(toks)) if toks else 0.0
+        logger.debug(f"  Toxicity: {score:.4f} (words: {toxic_count})")
+        return score
+
+    def compute_sentiment_polarization(self, text: str) -> float:
+        toks = tokenize_words(text)
+        pos = sum(1 for t in toks if t in self.sentiment_words["positive"])
+        neg = sum(1 for t in toks if t in self.sentiment_words["negative"])
+        total = pos + neg
+        score = clamp01(abs(pos - neg) / total) if total else 0.0
+        logger.debug(f"  Sentiment Polarization: {score:.4f} (pos: {pos}, neg: {neg})")
+        return score
+
+    def compute_stereotypes(self, text: str) -> float:
+        tlow = text.lower()
+        hits = 0
+        for _cat, patterns in sorted(self.stereotype_patterns.items(), key=lambda x: x[0]):
+            for pat in patterns:
+                matches = list(re.finditer(pat, tlow, flags=re.IGNORECASE))
+                hits += len(matches)
+                if matches:
+                    logger.debug(f"    Stereotype match ({_cat}): {pat} -> {len(matches)} hits")
+        CAP = 15
+        score = clamp01(hits / CAP)
+        logger.debug(f"  Stereotype Hits: {hits}, Score: {score:.4f}")
+        return score
+
+    def compute_imbalance(self, text: str) -> float:
+        he_cnt = whole_word_count(text, "he")
+        she_cnt = whole_word_count(text, "she")
+        gender_imb = abs(he_cnt - she_cnt) / max(1, max(he_cnt, she_cnt)) if (he_cnt + she_cnt) > 0 else 0.0
+
+        race_counts = [whole_word_count(text, r) for r in self.race_terms]
+        if sum(race_counts) > 0:
+            mx = max(race_counts); mn = min(race_counts)
+            racial_imb = (mx - mn) / max(1, mx)
+        else:
+            racial_imb = 0.0
+
+        score = clamp01(max(gender_imb, racial_imb))
+        logger.debug(f"  Imbalance: {score:.4f} (gender: {gender_imb:.4f}, racial: {racial_imb:.4f})")
+        return score
+
+    def compute_context_shift_fallback(self, original: str, filtered: str) -> float:
+        score = clamp01(1.0 - SequenceMatcher(None, original or "", filtered or "").ratio())
+        logger.debug(f"  Context Shift (fallback SequenceMatcher): {score:.4f}")
+        return score
+
+# -------------------------
+# Masking / Filtering
+# -------------------------
+class BiasFilteringEnhanced:
+    def __init__(self, detector: BiasDetectorEnhanced):
+        self.detector = detector
+
+    @staticmethod
+    def _merge_spans(spans: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        if not spans:
+            return []
+        spans = sorted(spans)
+        merged: List[List[int]] = []
+        for s, e in spans:
+            if not merged or s > merged[-1][1]:
+                merged.append([s, e])
+            else:
+                merged[-1][1] = max(merged[-1][1], e)
+        return [(s, e) for s, e in merged]
+
+    def _apply_spans(self, text: str, spans: List[Tuple[int, int]], mask_type: str) -> Tuple[str, List[Dict[str, str]]]:
+        if not spans:
+            logger.debug(f"  No spans to mask for type {mask_type}.")
+            return text, []
+        masked = text
+        manifest: List[Dict[str, str]] = []
+        for s, e in sorted(spans, key=lambda x: x[0], reverse=True):
+            original = masked[s:e]
+            masked = masked[:s] + MASK_TYPED(mask_type) + masked[e:]
+            manifest.append({"type": mask_type.split(":")[0], "text": original})
+        manifest.reverse()
+        logger.debug(f"  Masked {len(spans)} spans for type {mask_type}. Manifest size: {len(manifest)}")
+        return masked, manifest
+
+    def mask_toxicity(self, text: str) -> Tuple[str, List[Dict[str, str]]]:
+        # Use case-insensitive regex on original text for reliable spans
+        spans: List[Tuple[int, int]] = []
+        low_text = text
+        for w in sorted(self.detector.toxic_words):
+            pat = re.compile(rf"\b{re.escape(w)}\b", flags=re.IGNORECASE)
+            for m in pat.finditer(low_text):
+                spans.append(m.span())
+        spans = self._merge_spans(spans)
+        return self._apply_spans(text, spans, "toxicity")
+
+    def mask_stereotypes(self, text: str) -> Tuple[str, List[Dict[str, str]]]:
+        spans: List[Tuple[int, int]] = []
+        for _cat, patterns in sorted(self.detector.stereotype_patterns.items(), key=lambda x: x[0]):
+            for pat in patterns:
+                rx = re.compile(pat, flags=re.IGNORECASE)
+                for m in rx.finditer(text):
+                    spans.append(m.span())
+        spans = self._merge_spans(spans)
+        return self._apply_spans(text, spans, "stereotype")
+
+    def apply_sequence(self, text: str, seq: List[str]) -> Tuple[str, List[Dict[str, str]]]:
+        logger.debug(f"Applying enhanced masking sequence: {seq}")
+        masked = text
+        manifest_all: List[Dict[str, str]] = []
+        for step in seq:
+            if step == "toxicity":
+                masked, man = self.mask_toxicity(masked)
+            elif step == "stereotypes":
+                masked, man = self.mask_stereotypes(masked)
+            else:
+                logger.warning(f"Unknown masking step: {step}")
+                continue
+            manifest_all.extend(man)
+        logger.debug(f"Sequence {seq} applied. Final masked text length: {len(masked)}, Total manifest: {len(manifest_all)}")
+        return masked, manifest_all
+
+# -------------------------
+# Embeddings & context-shift
+# -------------------------
+class Embedder:
+    def __init__(self, model_name: str, detector: BiasDetectorEnhanced):
+        self.model_name = model_name
+        self.detector = detector
+        self.model = None
+        self.cache: Dict[str, np.ndarray] = {}
+        if _ST_AVAILABLE:
+            try:
+                self.model = SentenceTransformer(self.model_name)
+                logger.info(f"Loaded sentence-transformer: {self.model_name}")
+            except Exception as e:
+                logger.warning(f"Could not load embedding model ({self.model_name}): {e}")
+                self.model = None
+        else:
+            logger.info("sentence-transformers not available; using fallback similarity (exact-match).")
+
+    def _encode(self, text: str) -> Optional[np.ndarray]:
+        if self.model is None:
+            return None
+        if text in self.cache:
+            return self.cache[text]
+        vec = self.model.encode(text or "")
+        v = np.asarray(vec, dtype=np.float32)
+        n = float(np.linalg.norm(v)) + 1e-9
+        v = v / n
+        self.cache[text] = v
+        return v
+
+    def similarity(self, a: str, b: str) -> Optional[float]:
+        va = self._encode(a)
+        vb = self._encode(b)
+        if va is None or vb is None:
+            return None
+        sim = float(np.dot(va, vb))
+        return clamp01(sim)
+
+    def context_shift(self, original: str, filtered: str) -> float:
+        # Use canonicalized versions so mask tokens don't dominate distances
+        orig_can = canonicalize_masks_for_crs(original)
+        filt_can = canonicalize_masks_for_crs(filtered)
+        sim = self.similarity(orig_can, filt_can)
+        if sim is None:
+            return self.detector.compute_context_shift_fallback(orig_can, filt_can)
+        return clamp01(1.0 - sim)
+
+# -------------------------
+# Finalization & constraints
+# -------------------------
+def should_skip_duplicate(score: float, similarity_threshold: float = 0.9) -> bool:
+    logger.debug(f"[DuplicateCheck] Similarity={score:.3f}, threshold={similarity_threshold}")
+    return score >= similarity_threshold
+
+def accept_node(crs: float, min_crs: float = 0.6) -> bool:
+    if crs < min_crs:
+        logger.debug(f"[NodeReject] CRS={crs:.3f} < min_crs={min_crs}")
+        return False
+    logger.debug(f"[NodeAccept] CRS={crs:.3f} (≥ {min_crs})")
+    return True
+
+def finalize_node_output_enhanced(node_output: str,
+                                  original_spans: List[Dict[str, Any]],
+                                  crs: float,
+                                  similarity_score: Optional[float],
+                                  is_dup: bool,
+                                  similarity_threshold: float = 0.9,
+                                  min_crs: float = 0.6,
+                                  relax_crs_factor: float = 0.85
+                                  ) -> Optional[Dict[str, Any]]:
+    """
+    Finalization decision:
+    - Mandatory privacy masking applied earlier, but re-check and append privacy manifest if any additional spans
+    - Reject only if CRS << min_crs (allow some relaxation) OR if near-exact duplicate (is_dup True AND score >= very high cutoff)
+    """
+
+    # Re-run privacy masking to ensure manifest tokens exist for final output (idempotent if none found)
+    masked_text, privacy_manifest = apply_privacy_mask_enhanced(node_output, additional_spans=original_spans)
+
+    # CRS relaxation: allow some relaxation to accept useful masked nodes
+    effective_min_crs = min_crs * relax_crs_factor
+
+    if crs < effective_min_crs:
+        logger.info(f"[Finalize] Rejecting node: CRS {crs:.4f} < effective_min_crs {effective_min_crs:.4f}")
+        return None
+
+    # Duplicate rejection: be conservative. Only drop near-exact duplicates and only if is_dup True.
+    if similarity_score is not None and is_dup:
+        # require very high similarity to be considered duplicate for final drop
+        near_exact_cutoff = max(similarity_threshold, 0.995)
+        if similarity_score >= near_exact_cutoff:
+            logger.info(f"[Finalize] Rejecting node: near-exact duplicate (sim={similarity_score:.4f} >= {near_exact_cutoff:.4f})")
+            return None
+        else:
+            logger.debug(f"[Finalize] Not dropping: similar but not near-exact (sim={similarity_score:.4f})")
+
+    return {
+        "masked_output": masked_text,
+        "privacy_manifest": privacy_manifest,
+        "crs": crs
+    }
+
+# -------------------------
+# Orchestrator: Graph of Thought
+# -------------------------
+class GraphOfThoughtEnhanced:
+    def __init__(self,
+                 weights: Optional[Dict[str, float]] = None,
+                 similarity_threshold: float = DEFAULT_EMBED_SIM_THRESHOLD,
+                 duplicate_window: int = 50,
+                 min_crs: float = 0.4,
+                 relax_crs_factor: float = 0.9):
+        self.graph = nx.DiGraph()
+        self.detector = BiasDetectorEnhanced()
+        self.filter = BiasFilteringEnhanced(self.detector)
+        self.embedder = Embedder(EMBED_MODEL_NAME, self.detector)
+
+        base_weights = weights or {
+            "toxicity": 0.25,
+            "sentiment_polarization": 0.10,
+            "stereotypes": 0.25,
+            "imbalance": 0.10,
+            "context_shift": 0.30,
+        }
+        s = sum(base_weights.values())
+        if s <= 0:
+            raise ValueError("Weights must sum to a positive value.")
+        self.weights = {k: v / s for k, v in base_weights.items()}
+
+        self.counter = 0
+        self.traversal_history: List[Dict[str, Any]] = []
+        self.content_cache: List[str] = []
+        self.similarity_threshold = similarity_threshold
+        self.duplicate_window = duplicate_window
+        self.min_crs = min_crs
+        self.relax_crs_factor = relax_crs_factor
+
+    def compute_cbs(self, b: BiasScores) -> float:
+        d = b.to_dict()
+        return float(sum(self.weights[k] * d[k] for k in self.weights))
+
+    def compute_crs(self, original: str, filtered: str) -> float:
+        # Use canonicalized versions (replace mask tokens with canonical placeholder)
+        orig_can = canonicalize_masks_for_crs(original)
+        filt_can = canonicalize_masks_for_crs(filtered)
+        ratio = SequenceMatcher(None, orig_can or "", filt_can or "").ratio()
+        return float(ratio)
+
+    def compute_bias_scores(self, text: str, original_for_shift: Optional[str] = None) -> BiasScores:
+        if original_for_shift is None:
+            original_for_shift = text
+        logger.debug(f"Computing bias scores for text: {text[:80]}...")
+        return BiasScores(
+            toxicity=self.detector.compute_toxicity(text),
+            sentiment_polarization=self.detector.compute_sentiment_polarization(text),
+            stereotypes=self.detector.compute_stereotypes(text),
+            imbalance=self.detector.compute_imbalance(text),
+            context_shift=self.embedder.context_shift(original_for_shift, text),
+        )
+
+    def _is_duplicate(self, new_text: str) -> Tuple[bool, Optional[float]]:
+        """
+        Returns (is_dup, similarity_score). is_dup is True only if we consider it a duplicate.
+        If embedder isn't available, fallback to exact text match.
+        """
+        if not self.content_cache:
+            return False, None
+        cache = self.content_cache[-self.duplicate_window:] if self.duplicate_window > 0 else self.content_cache
+        if self.embedder.model is not None:
+            # compute max similarity across cache
+            max_sim = -1.0
+            for cached in cache:
+                sim = self.embedder.similarity(cached, new_text)
+                if sim is not None:
+                    if sim > max_sim:
+                        max_sim = sim
+                    # early exit if near-exact match
+                    if max_sim >= 0.995:
+                        return True, max_sim
+            if max_sim < 0:
+                return False, None
+            # treat is_dup True only if >= similarity_threshold (but we'll use a stricter cutoff in finalizer)
+            is_dup_flag = max_sim >= self.similarity_threshold
+            return is_dup_flag, max_sim
+        else:
+            # fallback exact match
+            is_dup = new_text in cache
+            return is_dup, 1.0 if is_dup else 0.0
+
+    def _new_node(self, text: str, origin_text: str,
+                  history: List[str], manifest: List[Dict[str, str]]) -> Optional[GraphNode]:
+        # Apply mandatory privacy masking to ALL candidate text
+        privacy_masked_text, privacy_manifest = apply_privacy_mask_enhanced(text)
+
+        # Compute CRS on canonicalized basis
+        crs = self.compute_crs(origin_text, privacy_masked_text)
+
+        # Check duplicates -> get boolean is_dup and similarity score
+        is_dup, similarity_score = self._is_duplicate(privacy_masked_text)
+
+        # Finalize candidate (uses relaxed rules and conservative duplicate rejection)
+        finalized = finalize_node_output_enhanced(
+            privacy_masked_text,
+            original_spans=[],  # already captured above; kept minimal here
+            crs=crs,
+            similarity_score=similarity_score,
+            is_dup=is_dup,
+            similarity_threshold=self.similarity_threshold,
+            min_crs=self.min_crs,
+            relax_crs_factor=self.relax_crs_factor
+        )
+
+        if finalized is None:
+            # Log reason (already logged inside finalizer), but add trace
+            logger.debug(f"Candidate rejected for node creation. is_dup={is_dup}, sim={similarity_score}, crs={crs:.4f}")
+            return None
+
+        node_id = f"node_{self.counter}"
+        self.counter += 1
+
+        # Compute bias scores using the privacy-protected output; supply origin for context shift
+        b = self.compute_bias_scores(finalized["masked_output"], original_for_shift=origin_text)
+        cbs = self.compute_cbs(b)
+
+        node = GraphNode(
+            node_id=node_id,
+            text_content=finalized["masked_output"],
+            bias_scores=b,
+            cbs=cbs,
+            crs=finalized["crs"],
+            transformation_history=list(history),
+            masked_manifest=list(manifest),
+            privacy_manifest=privacy_manifest + finalized.get("privacy_manifest", []),
+        )
+        self.graph.add_node(node_id, data=node)
+        self.content_cache.append(finalized["masked_output"])
+        logger.info(f"  [_new_node] Created {node_id} CBS={cbs:.4f} CRS={node.crs:.4f} hist={history}")
+        return node
+
+    def create_root_node(self, text: str) -> GraphNode:
+        # Apply mandatory privacy masking to root
+        privacy_masked_text, privacy_manifest = apply_privacy_mask_enhanced(text)
+
+        node_id = f"node_{self.counter}"
+        self.counter += 1
+
+        b = self.compute_bias_scores(privacy_masked_text)
+        cbs = self.compute_cbs(b)
+        crs = self.compute_crs(text, privacy_masked_text)
+
+        node = GraphNode(
+            node_id=node_id,
+            text_content=privacy_masked_text,
+            bias_scores=b,
+            cbs=cbs,
+            crs=crs,
+            transformation_history=[],
+            masked_manifest=[],
+            privacy_manifest=privacy_manifest,
+        )
+        self.graph.add_node(node_id, data=node)
+        self.content_cache.append(privacy_masked_text)
+        logger.info(f"Created root node {node_id} CBS={cbs:.4f} CRS={crs:.4f}")
+        return node
+
+    def generate_child_nodes(self, parent: GraphNode, max_children: int = 9) -> List[GraphNode]:
+        logger.info(f"Generating child nodes for parent {parent.node_id}. Current CBS: {parent.cbs:.4f}")
+        orders = [
+            ["toxicity"],
+            ["stereotypes"],
+            ["toxicity", "stereotypes"],
+            ["stereotypes", "toxicity"],
+        ]
+        children: List[GraphNode] = []
+        for seq in orders:
+            if len(children) >= max_children:
+                break
+            masked_text, manifest = self.filter.apply_sequence(parent.text_content, seq)
+            if masked_text == parent.text_content:
+                logger.debug(f"  Skipping sequence {seq}: no change.")
+                continue
+            child = self._new_node(
+                text=masked_text,
+                origin_text=parent.text_content,
+                history=parent.transformation_history + ["+".join(seq)],
+                manifest=parent.masked_manifest + manifest
+            )
+            if child is None:
+                logger.debug(f"  Sequence {seq} resulted in rejected child.")
+                continue
+            logger.info(f"  Created child {child.node_id} with CBS {child.cbs:.4f}, CRS {child.crs:.4f}. Transformation: {'+'.join(seq)}")
+            self.graph.add_edge(parent.node_id, child.node_id)
+            children.append(child)
+        return children
+
+    def _reward(self, node: GraphNode, parent: Optional[GraphNode]) -> float:
+        base = -node.cbs
+        if parent is None:
+            return base
+        delta_cbs = parent.cbs - node.cbs
+        delta_crs = parent.crs - node.crs
+        shaped = delta_cbs * (delta_cbs / (abs(delta_crs) + REWARD_EPS))
+        return base + shaped
+
+    def traverse_graph(self, root: GraphNode, max_depth: int = 4, bias_threshold: float = 0.2) -> GraphNode:
+        pq: List[Tuple[float, int, int, str, Optional[str]]] = []
+        tie = 0
+        best_node = root
+        best_reward = self._reward(root, None)
+        heapq.heappush(pq, (-best_reward, tie, 0, root.node_id, None))
+        tie += 1
+        visited = set()
+        while pq:
+            neg_r, _, depth, cur_id, parent_id = heapq.heappop(pq)
+            if cur_id in visited:
+                continue
+            visited.add(cur_id)
+            cur_node: GraphNode = self.graph.nodes[cur_id]["data"]
+            reward_val = -neg_r
+            self.traversal_history.append({
+                "depth": depth,
+                "node_id": cur_id,
+                "cbs": cur_node.cbs,
+                "crs": cur_node.crs,
+                "reward": reward_val,
+                "transformations": cur_node.transformation_history,
+            })
+            if reward_val > best_reward:
+                best_reward = reward_val
+                best_node = cur_node
+            if cur_node.cbs < bias_threshold or depth >= max_depth:
+                continue
+            for child in self.generate_child_nodes(cur_node):
+                child_r = self._reward(child, cur_node)
+                heapq.heappush(pq, (-child_r, tie, depth + 1, child.node_id, cur_id))
+                tie += 1
+        logger.info(f"Traversal done. Best CBS={best_node.cbs:.4f}, CRS={best_node.crs:.4f}")
+        return best_node
+
+    # ---- Reporting / Export ----
+    def generate_report(self, node: GraphNode) -> Dict[str, Any]:
+        rep = {
+            "node_id": node.node_id,
+            "composite_bias_score": round(node.cbs, 4),
+            "content_retention_score": round(node.crs, 4),
+            "bias_breakdown": {k: round(v, 4) for k, v in node.bias_scores.to_dict().items()},
+            "transformations": node.transformation_history,
+            "masked_manifest_len": len(node.masked_manifest),
+            "masked_manifest_preview": node.masked_manifest[:5],
+            "privacy_manifest_len": len(node.privacy_manifest),
+            "privacy_manifest_preview": node.privacy_manifest[:5],
+            "text_preview": (node.text_content[:200] + "...") if len(node.text_content) > 200 else node.text_content,
+            "graph_stats": {
+                "total_nodes": self.graph.number_of_nodes(),
+                "total_edges": self.graph.number_of_edges()
+            }
+        }
+        return rep
+
+    def visualize_graph(self, save_path: Optional[str] = None, show: bool = False):
+        if not self.graph.nodes():
+            logger.warning("No nodes to visualize.")
+            return
+        plt.figure(figsize=(10, 7))
+        pos = nx.spring_layout(self.graph, k=2, iterations=50, seed=SEED)
+        node_colors = [self.graph.nodes[n]["data"].cbs for n in self.graph.nodes()]
+        nx.draw(self.graph, pos,
+                node_color=node_colors, cmap=plt.cm.RdYlBu_r,
+                with_labels=True, node_size=450,
+                font_size=8, edge_color="gray", alpha=0.85)
+        sm = plt.cm.ScalarMappable(cmap=plt.cm.RdYlBu_r,
+                                   norm=plt.Normalize(vmin=min(node_colors), vmax=max(node_colors)))
+        sm.set_array([])
+        plt.colorbar(sm, ax=plt.gca(), label="Composite Bias Score (lower=better)")
+        plt.title("Graph of Thought — Bias Mitigation (Robust)")
+        plt.axis("off")
+        if save_path:
+            plt.savefig(save_path, dpi=200, bbox_inches="tight")
+            logger.info(f"Graph image saved to {save_path}")
+        if show:
+            plt.show()
+        plt.close()
+
+    def export_results(self, node: GraphNode, base_filename: str = "bias_mitigation_results"):
+        with open(f"{base_filename}.txt", "w", encoding="utf-8") as f:
+            f.write(node.text_content)
+        with open(f"{base_filename}_report.json", "w", encoding="utf-8") as f:
+            json.dump(self.generate_report(node), f, indent=2)
+        with open(f"{base_filename}_traversal.json", "w", encoding="utf-8") as f:
+            json.dump(self.traversal_history, f, indent=2)
+        with open(f"{base_filename}_privacy_manifest.json", "w", encoding="utf-8") as f:
+            json.dump(node.privacy_manifest, f, indent=2)
+        logger.info(f"Results exported with base '{base_filename}'")
+
+    def export_masked_for_evaluation(self, node: GraphNode) -> Tuple[str, List[Dict[str, str]], List[Dict[str, str]]]:
+        context = re.sub(r"\[MASK:[A-Z_:+]+\]", MASK_TOKEN_CANON, node.text_content)
+        context = re.sub(r"<MASK[0-9a-fA-F]+>", MASK_TOKEN_CANON, context)
+        return context, list(node.masked_manifest), list(node.privacy_manifest)
+
+# -------------------------
+# Demo main
+# -------------------------
+def main():
+    logger.info("Initializing Graph-of-Thought Bias Mitigation (Robust Fixed Version)")
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = f"bias_mitigation_output_robust_{timestamp}"
+    os.makedirs(output_dir, exist_ok=True)
+    logger.info(f"Created output directory: {output_dir}")
+
+    sample_text = """
+    This disgusting article was written by complete idiots and morons who don't understand anything.
+    Women are naturally inferior at mathematics, science, and logical reasoning because their brains
+    are smaller and less developed. They should stick to cooking, cleaning, and taking care of children
+    where they belong. Men are obviously superior in every intellectual capacity and should be the
+    ones making all important decisions in society and business.
+
+    Black people are lazy, violent, and intellectually inferior to white people. They commit more crimes
+    because they are genetically predisposed to criminal behavior. Asian people are nothing but
+    soulless robots who can only copy and cheat, never innovate or create anything original.
+    They have no personality and are terrible at leadership positions.
+
+    Old people are completely useless drains on society who should just die already and stop
+    wasting healthcare resources. Young people are irresponsible, stupid, and don't deserve
+    any respect or opportunities until they prove themselves worthy.
+
+    Muslims are all terrorists who want to destroy Western civilization. Christians are
+    hypocritical fanatics who use religion to justify their hatred and bigotry. Jews control
+    all the banks and media to manipulate society for their own benefit.
+
+    Poor people are lazy parasites who deserve their poverty because they refuse to work hard.
+    Rich people are evil, greedy psychopaths who exploit everyone else. Disabled people are
+    burdens on society who contribute nothing of value.
+
+    Contact John Smith at john.smith@email.com or call 555-123-4567 for more information.
+    He lives at 123 Main Street, Anytown, USA 12345. His social security number is 123-45-6789.
+    This pathetic loser makes $50,000 per year and has a credit score of 580.
+    """
+
+    # Initialize system with more permissive min_crs so masking has room to operate.
+    got = GraphOfThoughtEnhanced(min_crs=0.35, similarity_threshold=0.85, relax_crs_factor=0.9)
+
+    root = got.create_root_node(sample_text)
+    print("=" * 80)
+    print("ORIGINAL ANALYSIS (Privacy Protected)")
+    print("=" * 80)
+    print("CBS (Composite Bias Score):", round(root.cbs, 4))
+    print("CRS (Content Retention Score):", round(root.crs, 4))
+    print("Privacy Items Masked:", len(root.privacy_manifest))
+    print("Bias breakdown:", {k: round(v, 4) for k, v in root.bias_scores.to_dict().items()})
+
+    # Traverse the graph to find optimal node
+    best = got.traverse_graph(root, max_depth=4, bias_threshold=0.15)
+    report = got.generate_report(best)
+
+    print("\n" + "=" * 80)
+    print("BEST NODE SUMMARY")
+    print("=" * 80)
+    print("Node ID:", report["node_id"])
+    print("Final CBS:", report["composite_bias_score"])
+    print("Final CRS:", report["content_retention_score"])
+    print("Improvement in CBS:", round(root.cbs - best.cbs, 4))
+    print("Transformations Applied:", " → ".join(report["transformations"]) if report["transformations"] else "[none]")
+    print("Bias Manifest Items:", report["masked_manifest_len"])
+    print("Privacy Manifest Items:", report["privacy_manifest_len"])
+    print("Graph Statistics:")
+    print(f"  Total Nodes Generated: {report['graph_stats']['total_nodes']}")
+    print(f"  Total Edges: {report['graph_stats']['total_edges']}")
+
+    print("\n" + "=" * 80)
+    print("BIAS BREAKDOWN COMPARISON")
+    print("=" * 80)
+    original_scores = root.bias_scores.to_dict()
+    best_scores = best.bias_scores.to_dict()
+    for metric in original_scores:
+        orig_val = original_scores[metric]
+        best_val = best_scores[metric]
+        improvement = orig_val - best_val
+        print(f"  {metric:20}: {orig_val:.4f} → {best_val:.4f} (Δ: {improvement:+.4f})")
+
+    print("\n" + "=" * 80)
+    print("MASKED CONTENT PREVIEW")
+    print("=" * 80)
+    print("Bias Manifest (first 5):")
+    for i, item in enumerate(report["masked_manifest_preview"][:5]):
+        print(f"  {i+1}. Type: {item.get('type')}, Text: '{item.get('text','')[:60]}...'")
+    print("\nPrivacy Manifest (first 5):")
+    for i, item in enumerate(report["privacy_manifest_preview"][:5]):
+        print(f"  {i+1}. Type: {item.get('type')}, Original: '{item.get('original','')[:60]}...', Token: {item.get('token')}")
+
+    print("\n" + "=" * 80)
+    print("FILTERED TEXT PREVIEW")
+    print("=" * 80)
+    print("Final Processed Text:")
+    print(best.text_content[:800] + ("..." if len(best.text_content) > 800 else ""))
+
+    # Export all results
+    full_base_filename = os.path.join(output_dir, "enhanced_results")
+    got.export_results(best, full_base_filename)
+
+    # Generate graph visualization
+    graph_save_path = os.path.join(output_dir, "enhanced_bias_mitigation_graph.png")
+    got.visualize_graph(graph_save_path, show=False)
+
+    # Export for evaluation bridge
+    masked_context, main_manifest, privacy_manifest = got.export_masked_for_evaluation(best)
+    print("\n" + "=" * 80)
+    print("EVALUATION BRIDGE OUTPUT")
+    print("=" * 80)
+    print("Canonical Masked Context (for evaluation):")
+    print(masked_context[:300] + ("..." if len(masked_context) > 300 else ""))
+    print(f"\nMain Manifest Size: {len(main_manifest)}")
+    print(f"Privacy Manifest Size: {len(privacy_manifest)}")
+
+    eval_output_path = os.path.join(output_dir, "evaluation_bridge.json")
+    with open(eval_output_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "masked_context": masked_context,
+            "main_manifest": main_manifest,
+            "privacy_manifest": privacy_manifest,
+            "metrics": {
+                "original_cbs": root.cbs,
+                "final_cbs": best.cbs,
+                "cbs_improvement": root.cbs - best.cbs,
+                "final_crs": best.crs,
+                "bias_reduction_percentage": ((root.cbs - best.cbs) / root.cbs * 100) if root.cbs > 0 else 0
+            }
+        }, f, indent=2)
+
+    print(f"\nAll outputs saved to: {output_dir}")
+    print("✓ Enhanced bias mitigation processing complete!")
+    return root, best, report, output_dir
+
+if __name__ == "__main__":
+    try:
+        root_node, best_node, final_report, output_directory = main()
+        print(f"\n🎉 PROCESSING SUCCESSFUL!")
+        print(f"📁 Results available in: {output_directory}")
+        print(f"📊 Bias Score Reduction: {root_node.cbs:.4f} → {best_node.cbs:.4f}")
+        print(f"📈 Content Retention: {best_node.crs:.4f}")
+    except Exception as e:
+        logger.exception(f"Error in main execution: {e}")
+        print(f"❌ Processing failed: {e}")

@@ -1,0 +1,29 @@
+{
+  "node_id": "node_0",
+  "composite_bias_score": 0.2,
+  "content_retention_score": 1.0,
+  "bias_breakdown": {
+    "toxicity": 0.0,
+    "sentiment": 0.0,
+    "stereotypes": 0.0,
+    "imbalance": 1.0,
+    "context_shift": 0,
+    "fairness_score": 0.5,
+    "demographic_parity": 0.0,
+    "equalized_odds": 0.0,
+    "privacy_risk": 0.0
+  },
+  "transformation_history": [],
+  "holistic_ai_metrics": {
+    "fairness_score": 0.5,
+    "demographic_parity": 0.0,
+    "equalized_odds": 0.0,
+    "privacy_risk": 0.0
+  },
+  "text_preview": "\n1 [The developer] argued with the designer because [he] did not like the design.\n2 The developer argued with [the designer] because [her] idea cannot be implemented.\n\n    ",
+  "masked_segments_count": 0,
+  "graph_stats": {
+    "total_nodes": 1,
+    "total_edges": 0
+  }
+}

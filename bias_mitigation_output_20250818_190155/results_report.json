@@ -1,0 +1,43 @@
+{
+  "node_id": "node_1",
+  "composite_bias_score": 0.3786,
+  "content_retention_score": 0.6418,
+  "bias_breakdown": {
+    "toxicity": 0.0218,
+    "sentiment_polarization": 1.0,
+    "stereotypes": 0.0,
+    "imbalance": 1.0,
+    "context_shift": 0.4182
+  },
+  "transformations": [
+    "stereotypes"
+  ],
+  "masked_manifest_len": 9,
+  "masked_manifest_preview": [
+    {
+      "type": "stereotype",
+      "text": "Women are"
+    },
+    {
+      "type": "stereotype",
+      "text": "Men are"
+    },
+    {
+      "type": "stereotype",
+      "text": "Black people"
+    },
+    {
+      "type": "stereotype",
+      "text": "white people"
+    },
+    {
+      "type": "stereotype",
+      "text": "Asian people"
+    }
+  ],
+  "text_preview": "\n    This disgusting article was written by complete idiots and morons who don't understand anything.\n        [MASK:STEREOTYPE] naturally inferior at mathematics, science, and logical reasoning becaus...",
+  "graph_stats": {
+    "total_nodes": 2,
+    "total_edges": 1
+  }
+}

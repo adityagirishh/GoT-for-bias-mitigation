@@ -1,0 +1,44 @@
+{
+  "node_id": "node_2",
+  "composite_bias_score": 0.3544,
+  "content_retention_score": 0.7442,
+  "bias_breakdown": {
+    "toxicity": 0.0,
+    "sentiment_polarization": 1.0,
+    "stereotypes": 0.0,
+    "imbalance": 1.0,
+    "context_shift": 0.3576
+  },
+  "transformations": [
+    "toxicity",
+    "stereotypes"
+  ],
+  "masked_manifest_len": 18,
+  "masked_manifest_preview": [
+    {
+      "type": "toxicity",
+      "text": "disgusting"
+    },
+    {
+      "type": "toxicity",
+      "text": "terrible"
+    },
+    {
+      "type": "toxicity",
+      "text": "useless"
+    },
+    {
+      "type": "toxicity",
+      "text": "stupid"
+    },
+    {
+      "type": "toxicity",
+      "text": "evil"
+    }
+  ],
+  "text_preview": "\n    This [MASK:TOXICITY] article was written by complete idiots and morons who don't understand anything.\n        [MASK:STEREOTYPE] at mathematics, science, and logical reasoning because their brains...",
+  "graph_stats": {
+    "total_nodes": 3,
+    "total_edges": 2
+  }
+}

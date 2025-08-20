@@ -1,0 +1,32 @@
+{
+  "node_id": "node_2",
+  "composite_bias_score": 0.3707,
+  "content_retention_score": 0.5771,
+  "bias_breakdown": {
+    "toxicity": 0.0194,
+    "sentiment": 1.0,
+    "stereotypes": 0.0,
+    "imbalance": 1.0,
+    "context_shift": 0.1679,
+    "fairness_score": 0.5,
+    "demographic_parity": 0.0,
+    "equalized_odds": 0.0,
+    "privacy_risk": 0.0
+  },
+  "transformation_history": [
+    "stereotypes_0.5",
+    "stereotypes_0.7"
+  ],
+  "holistic_ai_metrics": {
+    "fairness_score": 0.5,
+    "demographic_parity": 0.0,
+    "equalized_odds": 0.0,
+    "privacy_risk": 0.0
+  },
+  "text_preview": "\nThis disgusting article was written by complete idiots and morons who don't understand anything. \n    [GENERALIZATION] naturally inferior at mathematics, science, and logical reasoning because their ...",
+  "masked_segments_count": 9,
+  "graph_stats": {
+    "total_nodes": 3,
+    "total_edges": 2
+  }
+}

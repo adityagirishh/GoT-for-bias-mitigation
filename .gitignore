@@ -1,0 +1,12 @@
+# Environment files
+.env
+iterations_and_testing/.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local config
+iterations_and_testing/__pycache__/

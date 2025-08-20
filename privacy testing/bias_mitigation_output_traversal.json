@@ -1,0 +1,31 @@
+[
+  {
+    "depth": 0,
+    "node_id": "node_0",
+    "cbs": 0.53374531835206,
+    "crs": 1.0,
+    "reward": -0.53374531835206,
+    "transformations": []
+  },
+  {
+    "depth": 1,
+    "node_id": "node_1",
+    "cbs": 0.45075726840332264,
+    "crs": 0.6564965807469753,
+    "reward": -0.4307079295953699,
+    "transformations": [
+      "stereotypes_0.5"
+    ]
+  },
+  {
+    "depth": 2,
+    "node_id": "node_2",
+    "cbs": 0.3706667225952296,
+    "crs": 0.5770730439303353,
+    "reward": -0.28990356616910634,
+    "transformations": [
+      "stereotypes_0.5",
+      "stereotypes_0.7"
+    ]
+  }
+]

@@ -1,0 +1,65 @@
+[
+  {
+    "token": "<MASK733c7577>",
+    "span": [
+      1668,
+      1680
+    ],
+    "original": "Contact John",
+    "type": "FULL_NAME"
+  },
+  {
+    "token": "<MASK821777eb>",
+    "span": [
+      1690,
+      1710
+    ],
+    "original": "john.smith@email.com",
+    "type": "EMAIL"
+  },
+  {
+    "token": "<MASK885629a4>",
+    "span": [
+      1719,
+      1731
+    ],
+    "original": "555-123-4567",
+    "type": "PHONE"
+  },
+  {
+    "token": "<MASK70f8b4c0>",
+    "span": [
+      1774,
+      1789
+    ],
+    "original": "123 <MASKcddd99",
+    "type": "ADDRESS"
+  },
+  {
+    "token": "<MASKcddd9946>",
+    "span": [
+      1778,
+      1789
+    ],
+    "original": "Main Street",
+    "type": "FULL_NAME"
+  },
+  {
+    "token": "<MASKfeb031ee>",
+    "span": [
+      1804,
+      1809
+    ],
+    "original": "12345",
+    "type": "ZIP_CODE"
+  },
+  {
+    "token": "<MASK3c74cd7e>",
+    "span": [
+      1841,
+      1852
+    ],
+    "original": "123-45-6789",
+    "type": "SSN"
+  }
+]

@@ -1,0 +1,20 @@
+[
+  {
+    "depth": 0,
+    "node_id": "node_0",
+    "cbs": 0.4656,
+    "crs": 1.0,
+    "reward": -0.4656,
+    "transformations": []
+  },
+  {
+    "depth": 1,
+    "node_id": "node_1",
+    "cbs": 0.35949950804193337,
+    "crs": 0.3450666666666667,
+    "reward": -0.34282035791291754,
+    "transformations": [
+      "stereotypes"
+    ]
+  }
+]

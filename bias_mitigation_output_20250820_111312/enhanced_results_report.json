@@ -1,0 +1,68 @@
+{
+  "node_id": "node_0",
+  "composite_bias_score": 0.4707,
+  "content_retention_score": 0.9132,
+  "bias_breakdown": {
+    "toxicity": 0.0827,
+    "sentiment_polarization": 1.0,
+    "stereotypes": 1.0,
+    "imbalance": 1.0,
+    "context_shift": 0.0
+  },
+  "transformations": [],
+  "masked_manifest_len": 0,
+  "masked_manifest_preview": [],
+  "privacy_manifest_len": 7,
+  "privacy_manifest_preview": [
+    {
+      "token": "<MASK87e80652>",
+      "span": [
+        1596,
+        1608
+      ],
+      "original": "Contact John",
+      "type": "FULL_NAME"
+    },
+    {
+      "token": "<MASK9b4c9e4f>",
+      "span": [
+        1618,
+        1638
+      ],
+      "original": "john.smith@email.com",
+      "type": "EMAIL"
+    },
+    {
+      "token": "<MASK198e066c>",
+      "span": [
+        1647,
+        1659
+      ],
+      "original": "555-123-4567",
+      "type": "PHONE"
+    },
+    {
+      "token": "<MASKa28190c0>",
+      "span": [
+        1698,
+        1713
+      ],
+      "original": "123 <MASK0c215b",
+      "type": "ADDRESS"
+    },
+    {
+      "token": "<MASK0c215b7b>",
+      "span": [
+        1702,
+        1713
+      ],
+      "original": "Main Street",
+      "type": "FULL_NAME"
+    }
+  ],
+  "text_preview": "\n    This disgusting article was written by complete idiots and morons who don't understand anything.\n    Women are naturally inferior at mathematics, science, and logical reasoning because their brai...",
+  "graph_stats": {
+    "total_nodes": 1,
+    "total_edges": 0
+  }
+}

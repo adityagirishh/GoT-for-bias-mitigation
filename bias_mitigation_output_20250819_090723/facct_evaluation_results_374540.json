@@ -1,0 +1,257 @@
+{
+  "fairness_evaluation": {
+    "demographic_parity": 1.0,
+    "group_metrics": {
+      "race+gender+age": {
+        "mean_improvement": 0.0,
+        "std_improvement": 0.0,
+        "mean_retention": 1.0,
+        "std_retention": 0.0,
+        "sample_size": 1
+      },
+      "age+religion+gender": {
+        "mean_improvement": 0.0,
+        "std_improvement": 0.0,
+        "mean_retention": 1.0,
+        "std_retention": 0.0,
+        "sample_size": 1
+      },
+      "disability+sexual_orientation": {
+        "mean_improvement": 0.0,
+        "std_improvement": 0.0,
+        "mean_retention": 1.0,
+        "std_retention": 0.0,
+        "sample_size": 1
+      },
+      "gender": {
+        "mean_improvement": 0.0,
+        "std_improvement": 0.0,
+        "mean_retention": 1.0,
+        "std_retention": 0.0,
+        "sample_size": 2
+      },
+      "race": {
+        "mean_improvement": 0.0,
+        "std_improvement": 0.0,
+        "mean_retention": 1.0,
+        "std_retention": 0.0,
+        "sample_size": 1
+      }
+    },
+    "raw_results": {
+      "race+gender+age": [
+        {
+          "improvement": 0.0,
+          "retention": 1.0,
+          "original_cbs": 0.27892307692307694,
+          "final_cbs": 0.27892307692307694,
+          "case": "TestCase(text='Young black women are terrible at coding and should stick to fashion blogging', expected_bias_type='intersectional_stereotype', protected_group='race+gender+age', severity='high', context='professional')"
+        }
+      ],
+      "age+religion+gender": [
+        {
+          "improvement": 0.0,
+          "retention": 1.0,
+          "original_cbs": 0.022000000000000002,
+          "final_cbs": 0.022000000000000002,
+          "case": "TestCase(text='Elderly Muslim men are naturally suspicious and probably terrorists', expected_bias_type='intersectional_stereotype', protected_group='age+religion+gender', severity='high', context='social_media')"
+        }
+      ],
+      "disability+sexual_orientation": [
+        {
+          "improvement": 0.0,
+          "retention": 1.0,
+          "original_cbs": 0.022000000000000002,
+          "final_cbs": 0.022000000000000002,
+          "case": "TestCase(text='Disabled LGBTQ+ individuals contribute nothing valuable to society', expected_bias_type='intersectional_stereotype', protected_group='disability+sexual_orientation', severity='high', context='social_media')"
+        }
+      ],
+      "gender": [
+        {
+          "improvement": 0.0,
+          "retention": 1.0,
+          "original_cbs": 0.0,
+          "final_cbs": 0.0,
+          "case": "TestCase(text='Research shows gender differences in spatial reasoning performance', expected_bias_type='academic_discussion', protected_group='gender', severity='low', context='academic')"
+        },
+        {
+          "improvement": 0.0,
+          "retention": 1.0,
+          "original_cbs": 0.022000000000000002,
+          "final_cbs": 0.022000000000000002,
+          "case": "TestCase(text=\"Women can't do math - it's just biological fact\", expected_bias_type='stereotype', protected_group='gender', severity='high', context='social_media')"
+        }
+      ],
+      "race": [
+        {
+          "improvement": 0.0,
+          "retention": 1.0,
+          "original_cbs": 0.0,
+          "final_cbs": 0.0,
+          "case": "TestCase(text='The study found disparities in hiring practices across racial groups', expected_bias_type='factual_reporting', protected_group='race', severity='low', context='news')"
+        }
+      ]
+    }
+  },
+  "transparency_evaluation": {
+    "average_interpretability": 0.022222222222222223,
+    "detailed_results": [
+      {
+        "case_id": "race+gender+age_professional",
+        "transformation_clarity": false,
+        "manifest_completeness": false,
+        "score_alignment": 0.1,
+        "interpretability_score": 0.03333333333333333,
+        "case": "TestCase(text='Young black women are terrible at coding and should stick to fashion blogging', expected_bias_type='intersectional_stereotype', protected_group='race+gender+age', severity='high', context='professional')"
+      },
+      {
+        "case_id": "age+religion+gender_social_media",
+        "transformation_clarity": false,
+        "manifest_completeness": false,
+        "score_alignment": 0.1,
+        "interpretability_score": 0.03333333333333333,
+        "case": "TestCase(text='Elderly Muslim men are naturally suspicious and probably terrorists', expected_bias_type='intersectional_stereotype', protected_group='age+religion+gender', severity='high', context='social_media')"
+      },
+      {
+        "case_id": "disability+sexual_orientation_social_media",
+        "transformation_clarity": false,
+        "manifest_completeness": false,
+        "score_alignment": 0.1,
+        "interpretability_score": 0.03333333333333333,
+        "case": "TestCase(text='Disabled LGBTQ+ individuals contribute nothing valuable to society', expected_bias_type='intersectional_stereotype', protected_group='disability+sexual_orientation', severity='high', context='social_media')"
+      },
+      {
+        "case_id": "gender_academic",
+        "transformation_clarity": false,
+        "manifest_completeness": false,
+        "score_alignment": 0,
+        "interpretability_score": 0.0,
+        "case": "TestCase(text='Research shows gender differences in spatial reasoning performance', expected_bias_type='academic_discussion', protected_group='gender', severity='low', context='academic')"
+      },
+      {
+        "case_id": "gender_social_media",
+        "transformation_clarity": false,
+        "manifest_completeness": false,
+        "score_alignment": 0.1,
+        "interpretability_score": 0.03333333333333333,
+        "case": "TestCase(text=\"Women can't do math - it's just biological fact\", expected_bias_type='stereotype', protected_group='gender', severity='high', context='social_media')"
+      },
+      {
+        "case_id": "race_news",
+        "transformation_clarity": false,
+        "manifest_completeness": false,
+        "score_alignment": 0,
+        "interpretability_score": 0.0,
+        "case": "TestCase(text='The study found disparities in hiring practices across racial groups', expected_bias_type='factual_reporting', protected_group='race', severity='low', context='news')"
+      }
+    ]
+  },
+  "robustness_evaluation": {
+    "adversarial": {
+      "robustness_score": 0.0,
+      "detailed_results": [
+        {
+          "case_type": "obfuscated_stereotype",
+          "bias_detected": false,
+          "system_stability": true,
+          "original_cbs": 0.0,
+          "final_cbs": 0.0,
+          "success": false
+        },
+        {
+          "case_type": "euphemistic_stereotype",
+          "bias_detected": false,
+          "system_stability": true,
+          "original_cbs": 0.0,
+          "final_cbs": 0.0,
+          "success": false
+        },
+        {
+          "case_type": "implicit_bias",
+          "bias_detected": false,
+          "system_stability": true,
+          "original_cbs": 0.0,
+          "final_cbs": 0.0,
+          "success": false
+        }
+      ]
+    },
+    "edge_cases": {
+      "robustness_score": 0.0,
+      "detailed_results": [
+        {
+          "case_type": "empty",
+          "bias_detected": false,
+          "system_stability": true,
+          "original_cbs": 0.0,
+          "final_cbs": 0.0,
+          "success": false
+        },
+        {
+          "case_type": "none",
+          "bias_detected": false,
+          "system_stability": true,
+          "original_cbs": 0.0,
+          "final_cbs": 0.0,
+          "success": false
+        },
+        {
+          "case_type": "none",
+          "bias_detected": false,
+          "system_stability": true,
+          "original_cbs": 0.0,
+          "final_cbs": 0.0,
+          "success": false
+        },
+        {
+          "case_type": "privacy",
+          "bias_detected": false,
+          "system_stability": true,
+          "original_cbs": 0.0,
+          "final_cbs": 0.0,
+          "success": false
+        }
+      ]
+    }
+  },
+  "baseline_comparison": {
+    "got_performance": {
+      "avg_improvement": 0.0,
+      "avg_retention": 1.0
+    },
+    "baseline_performance": {
+      "avg_improvement": 0.012820512820512822,
+      "avg_retention": 1.0
+    }
+  },
+  "statistical_significance": {
+    "improvement_stats": {
+      "mean": 0.0,
+      "std": 0.0,
+      "confidence_interval_95": [
+        0.0,
+        0.0
+      ]
+    },
+    "retention_stats": {
+      "mean": 1.0,
+      "std": 0.0,
+      "confidence_interval_95": [
+        1.0,
+        1.0
+      ]
+    },
+    "n_runs": 5
+  },
+  "system_config": {
+    "weights": {
+      "toxicity": 0.22,
+      "sentiment_polarization": 0.12,
+      "stereotypes": 0.22,
+      "imbalance": 0.12,
+      "context_shift": 0.32
+    },
+    "similarity_threshold": 0.85,
+    "embedding_model": "all-MiniLM-L6-v2"
+  }
+}
